@@ -1,0 +1,87 @@
+# ── Dataset ─────────────────────────────────────────────────────────────────
+data:
+  # Switch category here only — no code changes needed.
+  # Supported: bottle | capsule | metal_nut  (any valid MVTec AD category works)
+  category: "bottle"
+  root: "/content/mvtec_ad"          # Colab extraction target
+  image_size: 256                    # resize shorter edge to this
+  center_crop: 224                   # center-crop after resize
+  seed: 42                           # global random seed for all splits
+
+# ── Download ─────────────────────────────────────────────────────────────────
+# Set archive_url OR archive_path (local/Drive path). Never commit credentials.
+# Obtain the URL by accepting the licence at:
+#   https://www.mvtec.com/company/research/datasets/mvtec-ad
+# Alternatively, set env var MVTEC_ARCHIVE_URL or MVTEC_ARCHIVE_PATH.
+download:
+  archive_url: ""       # e.g. "https://.../<category>.tar.gz"  (leave blank to use path)
+  archive_path: ""      # e.g. "/content/drive/MyDrive/mvtec/bottle.tar.gz"
+
+# ── DataLoader ───────────────────────────────────────────────────────────────
+dataloader:
+  batch_size: 32
+  num_workers: 2
+
+# ── Splits ───────────────────────────────────────────────────────────────────
+splits:
+  # Fraction of official test images used for threshold calibration.
+  # The remainder forms the final evaluation set (never used for tuning).
+  calibration_fraction: 0.5
+
+# ── Feature extraction ───────────────────────────────────────────────────────
+model:
+  backbone: "resnet18"
+  # Intermediate ResNet layers to extract patch embeddings from.
+  layers:
+    - "layer2"
+    - "layer3"
+
+# ── Memory bank / coreset ────────────────────────────────────────────────────
+memory_bank:
+  limit: 50000          # max patch embeddings before coreset subsampling
+  coreset_ratio: 0.1    # fraction kept after greedy coreset subsampling
+
+# ── Anomaly scoring ──────────────────────────────────────────────────────────
+scoring:
+  k_neighbours: 9       # k for k-NN distance query against memory bank
+  # top_k_percent: fraction of highest-scoring patches used for image-level score
+  top_k_percent: 0.03   # 3 % → roughly the single max patch for small feature maps
+
+# ── Severity (visual estimate only — not a safety or acceptance rating) ──────
+severity:
+  # Weights for Visual Severity Index; must be non-negative and sum to 1.0.
+  weights:
+    intensity: 0.6      # contribution from normalised anomaly intensity
+    area: 0.4           # contribution from normalised affected area
+
+  # Pixel-level threshold calibration
+  pixel_threshold_method: "f1_optimal"   # "f1_optimal" | "percentile"
+  pixel_threshold_percentile: 95         # used only when method = "percentile"
+
+  # Image-level threshold calibration
+  image_threshold_method: "f1_optimal"   # "f1_optimal" | "percentile"
+  image_threshold_percentile: 95         # used only when method = "percentile"
+
+  # Anomaly intensity normalisation
+  # min/max are computed from calibration images (normal + anomalous).
+  # top_k_percent mirrors scoring.top_k_percent — mean of top-k% pixel scores.
+
+  # Affected-area normalisation
+  # Normalised area = area_pct / area_norm_reference_pct, clipped to [0, 1].
+  # Reference = this percentile of defect-area values across calibration
+  # anomalous images.  Set per-category; do not assume one value fits all.
+  area_norm_percentile: 95   # e.g. 95th percentile of calibration defect areas
+
+  # Severity level boundaries (applied to the Visual Severity Index in [0,100]).
+  # Derived from tertiles of calibration anomaly VSI values by default;
+  # override here if needed.
+  level_low_max: 33.3        # VSI <= this → Low
+  level_moderate_max: 66.6   # VSI <= this → Moderate  (else → High)
+
+  # Minimum number of anomalous pixels required to compute VSI reliably.
+  min_anomalous_pixels: 10
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  artifacts: "artifacts/"   # memory bank, threshold, coreset (.npy — git-ignored)
+  outputs: "outputs/"       # heatmaps, result CSVs, visualisations
