@@ -1,10 +1,10 @@
 # DefectAI — Industrial Defect Detection
 
-A from-scratch PatchCore-style anomaly detection system built for the
+A anomaly detection system built for the
 [MVTec AD](https://www.mvtec.com/company/research/datasets/mvtec-ad) dataset.
-Written as a master's deep-learning course project.
 
-> **No Anomalib, no prebuilt PatchCore.** Every component — feature extraction,
+
+> Every component — feature extraction,
 > memory bank, coreset subsampling, anomaly scoring, severity estimation,
 > evaluation, and the Streamlit dashboard — is implemented from scratch in
 > `src/`.
