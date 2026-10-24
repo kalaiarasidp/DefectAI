@@ -36,14 +36,13 @@ DEFINITIONS
                         Weights are non-negative and must sum to 1.0.
                         Range: [0, 100].
 
-  Severity Level      : Normal | Low | Moderate | High | Uncertain
+  Severity Level      : Normal | Low | Moderate | High
                         Normal    — image-level score below image_threshold.
                         Low       — VSI in (0, level_low_max].
                         Moderate  — VSI in (level_low_max, level_moderate_max].
                         High      — VSI > level_moderate_max.
-                        Uncertain — anomalous pixels < min_anomalous_pixels,
-                                    or input contains NaN/Inf,
-                                    or map is constant (no gradient).
+                        Moderate is used as a fallback when the map is unusable
+                        or has too few anomalous pixels for a reliable VSI.
 """
 
 from __future__ import annotations
@@ -135,7 +134,7 @@ class SeverityResult:
 
     Fields
     ------
-    level                : str  — "Normal" | "Low" | "Moderate" | "High" | "Uncertain"
+    level                : str  — "Normal" | "Low" | "Moderate" | "High"
     vsi                  : float | None — Visual Severity Index in [0, 100], or None
     affected_area_pct    : float — percentage of image pixels flagged as anomalous
     norm_area            : float | None — affected_area_pct normalised to [0, 1]
@@ -149,7 +148,9 @@ class SeverityResult:
     area_norm_reference  : float — reference area (%) used for area normalisation
     intensity_min        : float — lower anchor for intensity normalisation
     intensity_max        : float — upper anchor for intensity normalisation
-    uncertain_reason     : str  — non-empty when level == "Uncertain"
+    uncertain_reason     : str  — non-empty when Moderate is a fallback
+    affected_pixel_count : int | None — pixels above the pixel threshold, if measurable
+    total_pixel_count    : int | None — total evaluated pixels, if measurable
     limitation_text      : str  — always set to LIMITATION_TEXT
     """
     level: str
@@ -167,6 +168,8 @@ class SeverityResult:
     intensity_min: float
     intensity_max: float
     uncertain_reason: str = ""
+    affected_pixel_count: Optional[int] = None
+    total_pixel_count: Optional[int] = None
     limitation_text: str = field(default=LIMITATION_TEXT, init=False)
 
 
@@ -422,10 +425,10 @@ def assign_severity_level(
     Full severity pipeline for one image.
 
     Steps:
-      1. Guard: NaN/Inf/constant map → Uncertain.
+      1. Guard: NaN/Inf/constant map → Moderate fallback.
       2. If image_score < image_threshold → Normal (no VSI computed).
       3. Compute affected_area_pct and anomaly_intensity.
-      4. Guard: too few anomalous pixels → Uncertain.
+      4. Guard: too few anomalous pixels → Moderate fallback.
       5. Compute normalised area and intensity.
       6. Compute VSI and assign Low / Moderate / High.
 
@@ -442,17 +445,21 @@ def assign_severity_level(
     # ── 1. Input guards ───────────────────────────────────────────────────────
     uncertain_reason = _check_map(anomaly_map)
     if uncertain_reason:
-        return _uncertain_result(anomaly_map, image_score, calib, uncertain_reason)
+        return _fallback_result(anomaly_map, image_score, calib, uncertain_reason)
 
     m = anomaly_map.astype(np.float32)
 
     # ── 2. Normal check ───────────────────────────────────────────────────────
     if image_score < calib.image_threshold:
-        area_pct = affected_area_percent(m, calib.pixel_threshold)
+        affected_pixels = int(np.count_nonzero(m > calib.pixel_threshold))
+        total_pixels = int(m.size)
+        area_pct = 100.0 * affected_pixels / total_pixels if total_pixels else 0.0
         return SeverityResult(
             level="Normal",
             vsi=None,
             affected_area_pct=area_pct,
+            affected_pixel_count=affected_pixels,
+            total_pixel_count=total_pixels,
             norm_area=None,
             anomaly_intensity=None,
             norm_intensity=None,
@@ -467,7 +474,9 @@ def assign_severity_level(
         )
 
     # ── 3. Measurements ───────────────────────────────────────────────────────
-    area_pct = affected_area_percent(m, calib.pixel_threshold)
+    affected_pixels = int(np.count_nonzero(m > calib.pixel_threshold))
+    total_pixels = int(m.size)
+    area_pct = 100.0 * affected_pixels / total_pixels if total_pixels else 0.0
     raw_intensity, norm_int = anomaly_intensity(
         m, calib.top_k_percent, calib.intensity_min, calib.intensity_max
     )
@@ -479,9 +488,11 @@ def assign_severity_level(
             f"Only {n_anomalous} anomalous pixel(s) detected "
             f"(minimum required: {calib.min_anomalous_pixels})."
         )
-        return _uncertain_result(anomaly_map, image_score, calib, reason,
-                                 area_pct=area_pct, raw_intensity=raw_intensity,
-                                 norm_intensity=norm_int)
+        return _fallback_result(anomaly_map, image_score, calib, reason,
+                                area_pct=area_pct, raw_intensity=raw_intensity,
+                                norm_intensity=norm_int,
+                                affected_pixel_count=affected_pixels,
+                                total_pixel_count=total_pixels)
 
     # ── 5. Normalised area ────────────────────────────────────────────────────
     ref = calib.area_norm_reference
@@ -501,6 +512,8 @@ def assign_severity_level(
         level=level,
         vsi=vsi,
         affected_area_pct=area_pct,
+        affected_pixel_count=affected_pixels,
+        total_pixel_count=total_pixels,
         norm_area=norm_area,
         anomaly_intensity=raw_intensity,
         norm_intensity=norm_int,
@@ -573,7 +586,7 @@ def _validate_weights(w_intensity: float, w_area: float) -> None:
         )
 
 
-def _uncertain_result(
+def _fallback_result(
     anomaly_map: np.ndarray,
     image_score: float,
     calib: SeverityCalibration,
@@ -581,18 +594,27 @@ def _uncertain_result(
     area_pct: Optional[float] = None,
     raw_intensity: Optional[float] = None,
     norm_intensity: Optional[float] = None,
+    affected_pixel_count: Optional[int] = None,
+    total_pixel_count: Optional[int] = None,
 ) -> SeverityResult:
-    """Build an Uncertain SeverityResult, filling in whatever was computed."""
+    """Build a Moderate fallback result, preserving the reason for the fallback."""
     if area_pct is None:
         try:
             a = np.asarray(anomaly_map, dtype=np.float32)
-            area_pct = affected_area_percent(a, calib.pixel_threshold) if np.isfinite(a).all() else 0.0
+            if a.ndim == 2 and a.size > 0 and np.isfinite(a).all():
+                total_pixel_count = int(a.size)
+                affected_pixel_count = int(np.count_nonzero(a > calib.pixel_threshold))
+                area_pct = 100.0 * affected_pixel_count / total_pixel_count
+            else:
+                area_pct = 0.0
         except Exception:
             area_pct = 0.0
     return SeverityResult(
-        level="Uncertain",
+        level="Moderate",
         vsi=None,
         affected_area_pct=area_pct,
+        affected_pixel_count=affected_pixel_count,
+        total_pixel_count=total_pixel_count,
         norm_area=None,
         anomaly_intensity=raw_intensity,
         norm_intensity=norm_intensity,

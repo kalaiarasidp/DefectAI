@@ -536,9 +536,11 @@ print(f"Image : {path}")
 print(f"GT label      : {'Anomaly' if label else 'Normal'}")
 print(f"Anomaly score : {score:.4f}  (threshold={sev_calib_fresh.image_threshold:.4f})")
 print(f"Severity level: {sev.level}")
+print(f"Affected area : {sev.affected_area_pct:.3f}%")
+if sev.affected_pixel_count is not None and sev.total_pixel_count is not None:
+    print(f"Pixels above threshold: {sev.affected_pixel_count} / {sev.total_pixel_count}")
 if sev.vsi is not None:
     print(f"VSI           : {sev.vsi:.1f} / 100")
-    print(f"Affected area : {sev.affected_area_pct:.2f}%")
 print()
 print(sev.limitation_text)
 """))

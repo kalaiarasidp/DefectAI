@@ -53,7 +53,6 @@ _SEVERITY_COLOURS = {
     "Low": "#f39c12",
     "Moderate": "#e67e22",
     "High": "#e74c3c",
-    "Uncertain": "#95a5a6",
 }
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -160,27 +159,44 @@ st.markdown(
 
 # ── Artifact loading (cached) ─────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="Loading model artifacts…")
-def _load_artifacts() -> tuple[AnomalyDetector, SeverityCalibration, dict]:
-    """
-    Load config, detector state, and severity calibration.
-    Returns (detector, calib, cfg) or raises RuntimeError with a clear message.
-    """
-    if not _CONFIG_PATH.exists():
-        raise RuntimeError(f"Config not found: {_CONFIG_PATH}")
-
+def _get_artifacts_root() -> Path:
     cfg = load_config(str(_CONFIG_PATH))
-
-    # Resolve artifact directory
     artifact_dir = Path(
         os.environ.get("DEFECTAI_ARTIFACTS", "")
         or cfg.get("paths", {}).get("artifacts", "artifacts/")
     )
     if not artifact_dir.is_absolute():
         artifact_dir = _REPO_ROOT / artifact_dir
+    return artifact_dir
+
+
+def _get_available_categories() -> list[str]:
+    """Return categories that have both artifact files present."""
+    root = _get_artifacts_root()
+    categories = []
+    if root.is_dir():
+        for d in sorted(root.iterdir()):
+            if d.is_dir() and (d / "detector_state.npz").exists() and (d / "severity_calibration.npz").exists():
+                categories.append(d.name)
+    return categories
+
+
+@st.cache_resource(show_spinner="Loading model artifacts…")
+def _load_artifacts(category: str) -> tuple[AnomalyDetector, SeverityCalibration, dict]:
+    """
+    Load config, detector state, and severity calibration for the given category.
+    Returns (detector, calib, cfg) or raises RuntimeError with a clear message.
+    """
+    if not _CONFIG_PATH.exists():
+        raise RuntimeError(f"Config not found: {_CONFIG_PATH}")
+
+    cfg = load_config(str(_CONFIG_PATH))
+    cfg["data"]["category"] = category
+
+    artifact_dir = _get_artifacts_root() / category
 
     detector_path = artifact_dir / "detector_state.npz"
-    calib_path = artifact_dir / "severity_calibration.npz"
+    calib_path    = artifact_dir / "severity_calibration.npz"
 
     missing = [p for p in (detector_path, calib_path) if not p.exists()]
     if missing:
@@ -259,6 +275,8 @@ def _append_history(
     score: float,
     severity: str,
     area_pct: float,
+    affected_pixel_count: Optional[int],
+    total_pixel_count: Optional[int],
 ) -> None:
     st.session_state["history"].append({
         "filename": filename,
@@ -267,7 +285,9 @@ def _append_history(
         "prediction": prediction,
         "score": round(score, 4),
         "severity": severity,
-        "area_pct": round(area_pct, 2),
+        "area_pct": round(area_pct, 3),
+        "affected_pixels": affected_pixel_count,
+        "total_pixels": total_pixel_count,
     })
 
 
@@ -300,7 +320,11 @@ def _severity_expander(result) -> None:
         st.markdown(f"- Image score: `{r.image_score:.4f}`")
         st.markdown(f"- Image threshold: `{r.image_threshold:.4f}`")
         st.markdown(f"- Pixel threshold: `{r.pixel_threshold:.4f}`")
-        st.markdown(f"- Affected area: `{r.affected_area_pct:.2f}%`")
+        st.markdown(
+            f"- Affected area: `{r.affected_area_pct:.3f}%` "
+            f"({r.affected_pixel_count if r.affected_pixel_count is not None else 'N/A'} / "
+            f"{r.total_pixel_count if r.total_pixel_count is not None else 'N/A'} pixels)"
+        )
         st.markdown(f"- Area norm. reference: `{r.area_norm_reference:.2f}%`")
     with col2:
         st.markdown(f"- Raw intensity: `{r.anomaly_intensity if r.anomaly_intensity is not None else 'N/A'}`")
@@ -311,7 +335,10 @@ def _severity_expander(result) -> None:
         st.markdown(f"- Visual Severity Index (VSI): `{vsi_str}`")
 
     if r.uncertain_reason:
-        st.warning(f"Uncertain reason: {r.uncertain_reason}")
+        st.warning(
+            "Severity fallback: showing Moderate because a reliable severity "
+            f"could not be calculated. {r.uncertain_reason}"
+        )
 
     st.markdown("---")
     st.caption(LIMITATION_TEXT)
@@ -337,9 +364,26 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    # ── Sidebar — category selector ───────────────────────────────────────────
+    available = _get_available_categories()
+
+    with st.sidebar:
+        st.markdown("### Category")
+        if not available:
+            st.error("No trained categories found in artifacts/.")
+            st.stop()
+
+        category = st.selectbox(
+            "Select category",
+            options=available,
+            index=0,
+            label_visibility="collapsed",
+        )
+        st.markdown("---")
+
     # ── Load artifacts ────────────────────────────────────────────────────────
     try:
-        detector, calib, cfg = _load_artifacts()
+        detector, calib, cfg = _load_artifacts(category)
     except RuntimeError as exc:
         st.markdown(
             f'<div class="error-card"><b>Artifact error</b><br><pre>{exc}</pre></div>',
@@ -347,21 +391,12 @@ def main() -> None:
         )
         st.stop()
 
-    category: str = cfg["data"]["category"]
-
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Sidebar — model info ──────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### Model info")
-        st.markdown(f"**Category:** `{category}`")
         st.markdown(f"**Backbone:** `{cfg['model']['backbone']}`")
         st.markdown(f"**Input size:** `{cfg['data']['center_crop']}×{cfg['data']['center_crop']}`")
         st.markdown(f"**Device:** `{'CUDA' if torch.cuda.is_available() else 'CPU'}`")
-        st.markdown("---")
-        st.markdown(
-            "**Supported categories** (one model per run):\n"
-            "bottle · capsule · metal_nut · carpet · grid · leather · "
-            "pill · screw · tile · toothbrush · transistor · wood · zipper"
-        )
         st.markdown("---")
         st.caption(
             "Uploaded images are processed in memory only and are **not saved to disk**."
@@ -427,6 +462,8 @@ def main() -> None:
         score=image_score,
         severity=severity_result.level,
         area_pct=severity_result.affected_area_pct,
+        affected_pixel_count=severity_result.affected_pixel_count,
+        total_pixel_count=severity_result.total_pixel_count,
     )
 
     # ── Results header ────────────────────────────────────────────────────────
@@ -467,7 +504,11 @@ def main() -> None:
         st.markdown(
             f'<div class="metric-card">'
             f'<div class="metric-label">Affected Area</div>'
-            f'<div class="metric-value">{severity_result.affected_area_pct:.1f}%</div>'
+            f'<div class="metric-value">{severity_result.affected_area_pct:.3f}%</div>'
+            f'<div style="font-size:0.7rem;color:#6c757d;">'
+            f'{severity_result.affected_pixel_count if severity_result.affected_pixel_count is not None else "N/A"} / '
+            f'{severity_result.total_pixel_count if severity_result.total_pixel_count is not None else "N/A"} pixels above threshold'
+            f'</div>'
             f"</div>",
             unsafe_allow_html=True,
         )

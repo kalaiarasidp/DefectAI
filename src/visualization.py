@@ -252,7 +252,7 @@ def plot_severity_vs_area(
 
     level_colour = {
         "Normal": "green", "Low": "blue",
-        "Moderate": "orange", "High": "red", "Uncertain": "grey",
+        "Moderate": "orange", "High": "red",
     }
     colours = [level_colour.get(r.level, "grey") for r in severity_results
                if r.level != "Normal"][:len(pred)]

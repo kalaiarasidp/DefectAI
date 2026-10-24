@@ -214,31 +214,46 @@ def test_normal_result_has_area(calib):
     m = _half_defect_map()
     result = assign_severity_level(m, image_score=0.1, calib=calib)
     assert result.affected_area_pct >= 0.0
+    assert result.affected_pixel_count == int(np.count_nonzero(m > calib.pixel_threshold))
+    assert result.total_pixel_count == m.size
+
+def test_small_affected_area_is_reported_without_rounding(calib):
+    m = np.zeros((224, 224), dtype=np.float32)
+    m.flat[:10] = 0.9
+    result = assign_severity_level(m, image_score=0.9, calib=calib)
+    assert result.affected_pixel_count == 10
+    assert result.total_pixel_count == 224 * 224
+    assert result.affected_area_pct == pytest.approx(100 * 10 / (224 * 224))
 
 
-# ── assign_severity_level — Uncertain ────────────────────────────────────────
+# ── assign_severity_level — Moderate fallback ────────────────────────────────
 
 def test_uncertain_on_nan_map(calib):
     bad = np.full((32, 32), float("nan"), dtype=np.float32)
     result = assign_severity_level(bad, image_score=0.9, calib=calib)
-    assert result.level == "Uncertain"
+    assert result.level == "Moderate"
     assert len(result.uncertain_reason) > 0
+    assert result.affected_pixel_count is None
+    assert result.total_pixel_count is None
 
 def test_uncertain_on_constant_map(calib):
     result = assign_severity_level(_map(0.8), image_score=0.9, calib=calib)
-    assert result.level == "Uncertain"
+    assert result.level == "Moderate"
+    assert len(result.uncertain_reason) > 0
 
 def test_uncertain_on_too_few_anomalous_pixels(calib):
     # Only 1 anomalous pixel; min_anomalous_pixels = 5
     m = np.zeros((32, 32), dtype=np.float32)
     m[0, 0] = 0.9
     result = assign_severity_level(m, image_score=0.9, calib=calib)
-    assert result.level == "Uncertain"
+    assert result.level == "Moderate"
+    assert len(result.uncertain_reason) > 0
 
 def test_uncertain_on_inf_map(calib):
     bad = np.full((32, 32), float("inf"), dtype=np.float32)
     result = assign_severity_level(bad, image_score=0.9, calib=calib)
-    assert result.level == "Uncertain"
+    assert result.level == "Moderate"
+    assert len(result.uncertain_reason) > 0
 
 
 # ── assign_severity_level — Low / Moderate / High ────────────────────────────
@@ -269,7 +284,7 @@ def _anomalous_map_with_vsi(target_vsi: float, calib: SeverityCalibration) -> np
 def test_low_severity(calib):
     m = _anomalous_map_with_vsi(10.0, calib)
     result = assign_severity_level(m, image_score=0.9, calib=calib)
-    assert result.level in ("Low", "Uncertain"), f"Got {result.level}, VSI={result.vsi}"
+    assert result.level == "Low", f"Got {result.level}, VSI={result.vsi}"
 
 def test_high_severity(calib):
     # Large area + high intensity → High
@@ -288,11 +303,10 @@ def test_result_fields_populated_for_anomalous(calib):
     rng = np.random.default_rng(2)
     m += rng.uniform(0, 1e-4, m.shape).astype(np.float32)
     result = assign_severity_level(m, image_score=0.9, calib=calib)
-    if result.level != "Uncertain":
-        assert result.vsi is not None
-        assert result.norm_area is not None
-        assert result.norm_intensity is not None
-        assert 0.0 <= result.vsi <= 100.0
+    assert result.vsi is not None
+    assert result.norm_area is not None
+    assert result.norm_intensity is not None
+    assert 0.0 <= result.vsi <= 100.0
 
 def test_limitation_text_always_present(calib):
     result = assign_severity_level(_map(0.1), image_score=0.1, calib=calib)

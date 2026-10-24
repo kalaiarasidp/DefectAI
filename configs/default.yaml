@@ -2,7 +2,7 @@
 data:
   # Switch category here only — no code changes needed.
   # Supported: bottle | capsule | metal_nut  (any valid MVTec AD category works)
-  category: "bottle"
+  category: "metal_nut"
   root: "/content/mvtec_ad"          # Colab extraction target
   image_size: 256                    # resize shorter edge to this
   center_crop: 224                   # center-crop after resize
